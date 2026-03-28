@@ -1,22 +1,21 @@
 import { Router, Request, Response } from 'express';
-import getDb from '../database';
+import { pool } from '../database';
 
 const router = Router();
 
 // GET /api/chores
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const chores = db.prepare(`
+    const { rows } = await pool.query(`
       SELECT c.*, k.name as kid_name, k.avatar as kid_avatar, k.color as kid_color,
         (SELECT COUNT(*) FROM chore_completions cc
-         WHERE cc.chore_id = c.id AND date(cc.completed_at) = date('now')) as completed_today
+         WHERE cc.chore_id = c.id AND cc.completed_at::date = CURRENT_DATE) as completed_today
       FROM chores c
       LEFT JOIN kids k ON c.assigned_kid_id = k.id
-      WHERE c.active = 1
+      WHERE c.active = true
       ORDER BY c.name
-    `).all();
-    res.json(chores);
+    `);
+    res.json(rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch chores' });
@@ -24,22 +23,22 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // POST /api/chores
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { name, description, points_value, frequency, assigned_kid_id } = req.body;
     if (!name) return res.status(400).json({ error: 'Name is required' });
-    const db = getDb();
-    const result = db.prepare(`
+    const insertResult = await pool.query(`
       INSERT INTO chores (name, description, points_value, frequency, assigned_kid_id)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(name, description || null, points_value || 10, frequency || 'daily', assigned_kid_id || null);
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING id
+    `, [name, description || null, points_value || 10, frequency || 'daily', assigned_kid_id || null]);
 
-    const chore = db.prepare(`
+    const { rows } = await pool.query(`
       SELECT c.*, k.name as kid_name, k.avatar as kid_avatar, k.color as kid_color
       FROM chores c LEFT JOIN kids k ON c.assigned_kid_id = k.id
-      WHERE c.id = ?
-    `).get(result.lastInsertRowid);
-    res.status(201).json(chore);
+      WHERE c.id = $1
+    `, [insertResult.rows[0].id]);
+    res.status(201).json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to create chore' });
@@ -47,16 +46,15 @@ router.post('/', (req: Request, res: Response) => {
 });
 
 // GET /api/chores/:id
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const chore = db.prepare(`
+    const { rows } = await pool.query(`
       SELECT c.*, k.name as kid_name, k.avatar as kid_avatar, k.color as kid_color
       FROM chores c LEFT JOIN kids k ON c.assigned_kid_id = k.id
-      WHERE c.id = ?
-    `).get(req.params.id);
-    if (!chore) return res.status(404).json({ error: 'Chore not found' });
-    res.json(chore);
+      WHERE c.id = $1
+    `, [req.params.id]);
+    if (rows.length === 0) return res.status(404).json({ error: 'Chore not found' });
+    res.json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch chore' });
@@ -64,18 +62,18 @@ router.get('/:id', (req: Request, res: Response) => {
 });
 
 // PUT /api/chores/:id
-router.put('/:id', (req: Request, res: Response) => {
+router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { name, description, points_value, frequency, assigned_kid_id, active } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM chores WHERE id = ?').get(req.params.id) as any;
-    if (!existing) return res.status(404).json({ error: 'Chore not found' });
+    const { rows: existingRows } = await pool.query('SELECT * FROM chores WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Chore not found' });
+    const existing = existingRows[0];
 
-    db.prepare(`
-      UPDATE chores SET name = ?, description = ?, points_value = ?, frequency = ?,
-        assigned_kid_id = ?, active = ?
-      WHERE id = ?
-    `).run(
+    await pool.query(`
+      UPDATE chores SET name = $1, description = $2, points_value = $3, frequency = $4,
+        assigned_kid_id = $5, active = $6
+      WHERE id = $7
+    `, [
       name ?? existing.name,
       description ?? existing.description,
       points_value ?? existing.points_value,
@@ -83,14 +81,14 @@ router.put('/:id', (req: Request, res: Response) => {
       assigned_kid_id !== undefined ? assigned_kid_id : existing.assigned_kid_id,
       active !== undefined ? active : existing.active,
       req.params.id
-    );
+    ]);
 
-    const updated = db.prepare(`
+    const { rows } = await pool.query(`
       SELECT c.*, k.name as kid_name, k.avatar as kid_avatar, k.color as kid_color
       FROM chores c LEFT JOIN kids k ON c.assigned_kid_id = k.id
-      WHERE c.id = ?
-    `).get(req.params.id);
-    res.json(updated);
+      WHERE c.id = $1
+    `, [req.params.id]);
+    res.json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to update chore' });
@@ -98,12 +96,11 @@ router.put('/:id', (req: Request, res: Response) => {
 });
 
 // DELETE /api/chores/:id
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM chores WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Chore not found' });
-    db.prepare('UPDATE chores SET active = 0 WHERE id = ?').run(req.params.id);
+    const { rows: existingRows } = await pool.query('SELECT * FROM chores WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Chore not found' });
+    await pool.query('UPDATE chores SET active = false WHERE id = $1', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -112,25 +109,25 @@ router.delete('/:id', (req: Request, res: Response) => {
 });
 
 // POST /api/chores/:id/complete
-router.post('/:id/complete', (req: Request, res: Response) => {
+router.post('/:id/complete', async (req: Request, res: Response) => {
   try {
     const { kid_id } = req.body;
     if (!kid_id) return res.status(400).json({ error: 'kid_id is required' });
 
-    const db = getDb();
-    const chore = db.prepare('SELECT * FROM chores WHERE id = ? AND active = 1').get(req.params.id) as any;
-    if (!chore) return res.status(404).json({ error: 'Chore not found' });
+    const { rows: choreRows } = await pool.query('SELECT * FROM chores WHERE id = $1 AND active = true', [req.params.id]);
+    if (choreRows.length === 0) return res.status(404).json({ error: 'Chore not found' });
+    const chore = choreRows[0];
 
-    const kid = db.prepare('SELECT * FROM kids WHERE id = ?').get(kid_id) as any;
-    if (!kid) return res.status(404).json({ error: 'Kid not found' });
+    const { rows: kidRows } = await pool.query('SELECT * FROM kids WHERE id = $1', [kid_id]);
+    if (kidRows.length === 0) return res.status(404).json({ error: 'Kid not found' });
 
     // Check if already completed today (for daily chores)
     if (chore.frequency === 'daily') {
-      const alreadyDone = db.prepare(`
+      const { rows: alreadyDone } = await pool.query(`
         SELECT id FROM chore_completions
-        WHERE chore_id = ? AND kid_id = ? AND date(completed_at) = date('now')
-      `).get(req.params.id, kid_id);
-      if (alreadyDone) {
+        WHERE chore_id = $1 AND kid_id = $2 AND completed_at::date = CURRENT_DATE
+      `, [req.params.id, kid_id]);
+      if (alreadyDone.length > 0) {
         return res.status(409).json({ error: 'Chore already completed today' });
       }
     }
@@ -138,20 +135,21 @@ router.post('/:id/complete', (req: Request, res: Response) => {
     const pointsEarned = chore.points_value;
 
     // Record completion
-    const completion = db.prepare(`
+    const { rows: completionRows } = await pool.query(`
       INSERT INTO chore_completions (chore_id, kid_id, points_earned)
-      VALUES (?, ?, ?)
-    `).run(req.params.id, kid_id, pointsEarned);
+      VALUES ($1, $2, $3)
+      RETURNING id
+    `, [req.params.id, kid_id, pointsEarned]);
 
     // Award points to kid
-    db.prepare('UPDATE kids SET points = points + ? WHERE id = ?').run(pointsEarned, kid_id);
+    await pool.query('UPDATE kids SET points = points + $1 WHERE id = $2', [pointsEarned, kid_id]);
 
-    const updatedKid = db.prepare('SELECT * FROM kids WHERE id = ?').get(kid_id);
+    const { rows: updatedKidRows } = await pool.query('SELECT * FROM kids WHERE id = $1', [kid_id]);
     res.json({
       success: true,
       points_earned: pointsEarned,
-      completion_id: completion.lastInsertRowid,
-      kid: updatedKid
+      completion_id: completionRows[0].id,
+      kid: updatedKidRows[0]
     });
   } catch (err) {
     console.error(err);

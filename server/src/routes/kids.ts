@@ -1,20 +1,19 @@
 import { Router, Request, Response } from 'express';
-import getDb from '../database';
+import { pool } from '../database';
 
 const router = Router();
 
 // GET /api/kids
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const kids = db.prepare(`
+    const { rows } = await pool.query(`
       SELECT k.*,
-        (SELECT COUNT(*) FROM chore_completions cc WHERE cc.kid_id = k.id AND date(cc.completed_at) = date('now')) as completions_today,
+        (SELECT COUNT(*) FROM chore_completions cc WHERE cc.kid_id = k.id AND cc.completed_at::date = CURRENT_DATE) as completions_today,
         (SELECT COUNT(*) FROM reward_redemptions rr WHERE rr.kid_id = k.id) as total_redemptions
       FROM kids k
       ORDER BY k.name
-    `).all();
-    res.json(kids);
+    `);
+    res.json(rows);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch kids' });
@@ -22,16 +21,15 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // POST /api/kids
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { name, age, avatar, color } = req.body;
     if (!name) return res.status(400).json({ error: 'Name is required' });
-    const db = getDb();
-    const result = db.prepare(
-      'INSERT INTO kids (name, age, avatar, color) VALUES (?, ?, ?, ?)'
-    ).run(name, age || null, avatar || '👤', color || '#4F46E5');
-    const kid = db.prepare('SELECT * FROM kids WHERE id = ?').get(result.lastInsertRowid);
-    res.status(201).json(kid);
+    const { rows } = await pool.query(
+      'INSERT INTO kids (name, age, avatar, color) VALUES ($1, $2, $3, $4) RETURNING *',
+      [name, age || null, avatar || '👤', color || '#4F46E5']
+    );
+    res.status(201).json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to create kid' });
@@ -39,31 +37,31 @@ router.post('/', (req: Request, res: Response) => {
 });
 
 // GET /api/kids/:id
-router.get('/:id', (req: Request, res: Response) => {
+router.get('/:id', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const kid = db.prepare('SELECT * FROM kids WHERE id = ?').get(req.params.id);
-    if (!kid) return res.status(404).json({ error: 'Kid not found' });
+    const { rows: kidRows } = await pool.query('SELECT * FROM kids WHERE id = $1', [req.params.id]);
+    if (kidRows.length === 0) return res.status(404).json({ error: 'Kid not found' });
+    const kid = kidRows[0];
 
-    const recentCompletions = db.prepare(`
+    const { rows: recentCompletions } = await pool.query(`
       SELECT cc.*, c.name as chore_name, c.points_value
       FROM chore_completions cc
       JOIN chores c ON cc.chore_id = c.id
-      WHERE cc.kid_id = ?
+      WHERE cc.kid_id = $1
       ORDER BY cc.completed_at DESC
       LIMIT 20
-    `).all(req.params.id);
+    `, [req.params.id]);
 
-    const recentRedemptions = db.prepare(`
+    const { rows: recentRedemptions } = await pool.query(`
       SELECT rr.*, r.name as reward_name, r.image_emoji
       FROM reward_redemptions rr
       JOIN rewards r ON rr.reward_id = r.id
-      WHERE rr.kid_id = ?
+      WHERE rr.kid_id = $1
       ORDER BY rr.redeemed_at DESC
       LIMIT 10
-    `).all(req.params.id);
+    `, [req.params.id]);
 
-    res.json({ ...kid as object, recentCompletions, recentRedemptions });
+    res.json({ ...kid, recentCompletions, recentRedemptions });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to fetch kid' });
@@ -71,27 +69,26 @@ router.get('/:id', (req: Request, res: Response) => {
 });
 
 // PUT /api/kids/:id
-router.put('/:id', (req: Request, res: Response) => {
+router.put('/:id', async (req: Request, res: Response) => {
   try {
     const { name, age, avatar, color, points } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM kids WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Kid not found' });
+    const { rows: existingRows } = await pool.query('SELECT * FROM kids WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Kid not found' });
+    const existing = existingRows[0];
 
-    db.prepare(`
-      UPDATE kids SET name = ?, age = ?, avatar = ?, color = ?, points = ?
-      WHERE id = ?
-    `).run(
-      name ?? (existing as any).name,
-      age ?? (existing as any).age,
-      avatar ?? (existing as any).avatar,
-      color ?? (existing as any).color,
-      points ?? (existing as any).points,
+    const { rows } = await pool.query(`
+      UPDATE kids SET name = $1, age = $2, avatar = $3, color = $4, points = $5
+      WHERE id = $6
+      RETURNING *
+    `, [
+      name ?? existing.name,
+      age ?? existing.age,
+      avatar ?? existing.avatar,
+      color ?? existing.color,
+      points ?? existing.points,
       req.params.id
-    );
-
-    const updated = db.prepare('SELECT * FROM kids WHERE id = ?').get(req.params.id);
-    res.json(updated);
+    ]);
+    res.json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to update kid' });
@@ -99,12 +96,11 @@ router.put('/:id', (req: Request, res: Response) => {
 });
 
 // DELETE /api/kids/:id
-router.delete('/:id', (req: Request, res: Response) => {
+router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM kids WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Kid not found' });
-    db.prepare('DELETE FROM kids WHERE id = ?').run(req.params.id);
+    const { rows: existingRows } = await pool.query('SELECT * FROM kids WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Kid not found' });
+    await pool.query('DELETE FROM kids WHERE id = $1', [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     console.error(err);
