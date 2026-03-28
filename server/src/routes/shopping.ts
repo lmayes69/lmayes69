@@ -1,97 +1,13 @@
 import { Router, Request, Response } from 'express';
-import { getDb } from '../database';
+import { pool } from '../database';
 import axios from 'axios';
 
 const router = Router();
 
-// GET /api/shopping
-router.get('/', (req: Request, res: Response) => {
+// DELETE /api/shopping/completed/clear  (must be before /:id)
+router.delete('/completed/clear', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const { source } = req.query;
-    let query = 'SELECT * FROM shopping_items';
-    const params: any[] = [];
-
-    if (source) {
-      query += ' WHERE list_source = ?';
-      params.push(source);
-    }
-
-    query += ' ORDER BY category, completed, name';
-    const items = db.prepare(query).all(...params);
-    res.json(items);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to fetch shopping items' });
-  }
-});
-
-// POST /api/shopping
-router.post('/', (req: Request, res: Response) => {
-  try {
-    const { name, quantity, category, notes, list_source } = req.body;
-    if (!name) return res.status(400).json({ error: 'Name is required' });
-    const db = getDb();
-    const result = db.prepare(`
-      INSERT INTO shopping_items (name, quantity, category, notes, list_source)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(name, quantity || '1', category || 'General', notes || null, list_source || 'manual');
-
-    const item = db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(result.lastInsertRowid);
-    res.status(201).json(item);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to create shopping item' });
-  }
-});
-
-// PUT /api/shopping/:id
-router.put('/:id', (req: Request, res: Response) => {
-  try {
-    const { name, quantity, category, completed, notes } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(req.params.id) as any;
-    if (!existing) return res.status(404).json({ error: 'Shopping item not found' });
-
-    db.prepare(`
-      UPDATE shopping_items SET name = ?, quantity = ?, category = ?, completed = ?, notes = ?
-      WHERE id = ?
-    `).run(
-      name ?? existing.name,
-      quantity ?? existing.quantity,
-      category ?? existing.category,
-      completed !== undefined ? (completed ? 1 : 0) : existing.completed,
-      notes ?? existing.notes,
-      req.params.id
-    );
-
-    const updated = db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(req.params.id);
-    res.json(updated);
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to update shopping item' });
-  }
-});
-
-// DELETE /api/shopping/:id
-router.delete('/:id', (req: Request, res: Response) => {
-  try {
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(req.params.id);
-    if (!existing) return res.status(404).json({ error: 'Shopping item not found' });
-    db.prepare('DELETE FROM shopping_items WHERE id = ?').run(req.params.id);
-    res.json({ success: true });
-  } catch (err) {
-    console.error(err);
-    res.status(500).json({ error: 'Failed to delete shopping item' });
-  }
-});
-
-// DELETE /api/shopping/completed/clear
-router.delete('/completed/clear', (req: Request, res: Response) => {
-  try {
-    const db = getDb();
-    db.prepare('DELETE FROM shopping_items WHERE completed = 1').run();
+    await pool.query('DELETE FROM shopping_items WHERE completed = true');
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -99,11 +15,92 @@ router.delete('/completed/clear', (req: Request, res: Response) => {
   }
 });
 
+// GET /api/shopping
+router.get('/', async (req: Request, res: Response) => {
+  try {
+    const { source } = req.query;
+    let query = 'SELECT * FROM shopping_items';
+    const params: any[] = [];
+
+    if (source) {
+      query += ' WHERE list_source = $1';
+      params.push(source);
+    }
+
+    query += ' ORDER BY category, completed, name';
+    const { rows } = await pool.query(query, params);
+    res.json(rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to fetch shopping items' });
+  }
+});
+
+// POST /api/shopping
+router.post('/', async (req: Request, res: Response) => {
+  try {
+    const { name, quantity, category, notes, list_source } = req.body;
+    if (!name) return res.status(400).json({ error: 'Name is required' });
+
+    const { rows } = await pool.query(`
+      INSERT INTO shopping_items (name, quantity, category, notes, list_source)
+      VALUES ($1, $2, $3, $4, $5)
+      RETURNING *
+    `, [name, quantity || '1', category || 'General', notes || null, list_source || 'manual']);
+
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to create shopping item' });
+  }
+});
+
+// PUT /api/shopping/:id
+router.put('/:id', async (req: Request, res: Response) => {
+  try {
+    const { name, quantity, category, completed, notes } = req.body;
+    const { rows: existingRows } = await pool.query('SELECT * FROM shopping_items WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Shopping item not found' });
+    const existing = existingRows[0];
+
+    const { rows } = await pool.query(`
+      UPDATE shopping_items SET name = $1, quantity = $2, category = $3, completed = $4, notes = $5
+      WHERE id = $6
+      RETURNING *
+    `, [
+      name ?? existing.name,
+      quantity ?? existing.quantity,
+      category ?? existing.category,
+      completed !== undefined ? completed : existing.completed,
+      notes !== undefined ? notes : existing.notes,
+      req.params.id,
+    ]);
+
+    res.json(rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to update shopping item' });
+  }
+});
+
+// DELETE /api/shopping/:id
+router.delete('/:id', async (req: Request, res: Response) => {
+  try {
+    const { rows: existingRows } = await pool.query('SELECT * FROM shopping_items WHERE id = $1', [req.params.id]);
+    if (existingRows.length === 0) return res.status(404).json({ error: 'Shopping item not found' });
+    await pool.query('DELETE FROM shopping_items WHERE id = $1', [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to delete shopping item' });
+  }
+});
+
 // GET /api/shopping/sync/microsoft-todo
 router.get('/sync/microsoft-todo', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: settingsRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = settingsRows[0];
 
     if (!settings?.microsoft_access_token) {
       return res.status(401).json({ error: 'Microsoft account not connected. Please connect in Settings.' });
@@ -138,31 +135,30 @@ router.get('/sync/microsoft-todo', async (req: Request, res: Response) => {
       const tasks = tasksResponse.data.value;
 
       for (const task of tasks) {
-        const existingItem = db.prepare(
-          'SELECT * FROM shopping_items WHERE external_id = ? AND list_source = ?'
-        ).get(task.id, 'microsoft_todo') as any;
+        const { rows: existingRows } = await pool.query(
+          'SELECT * FROM shopping_items WHERE external_id = $1 AND list_source = $2',
+          [task.id, 'microsoft_todo']
+        );
+        const existingItem = existingRows[0];
 
         if (!existingItem) {
-          db.prepare(`
+          await pool.query(`
             INSERT INTO shopping_items (name, completed, list_source, external_id, category)
-            VALUES (?, ?, 'microsoft_todo', ?, 'General')
-          `).run(
-            task.title,
-            task.status === 'completed' ? 1 : 0,
-            task.id
-          );
+            VALUES ($1, $2, 'microsoft_todo', $3, 'General')
+          `, [task.title, task.status === 'completed', task.id]);
         } else {
-          db.prepare(`
-            UPDATE shopping_items SET name = ?, completed = ? WHERE id = ?
-          `).run(task.title, task.status === 'completed' ? 1 : 0, existingItem.id);
+          await pool.query(
+            'UPDATE shopping_items SET name = $1, completed = $2 WHERE id = $3',
+            [task.title, task.status === 'completed', existingItem.id]
+          );
         }
         allItems.push(task);
       }
     }
 
-    const updatedItems = db.prepare(
+    const { rows: updatedItems } = await pool.query(
       "SELECT * FROM shopping_items WHERE list_source = 'microsoft_todo' ORDER BY name"
-    ).all();
+    );
 
     res.json({
       success: true,
@@ -181,8 +177,8 @@ router.get('/sync/microsoft-todo', async (req: Request, res: Response) => {
 // POST /api/shopping/sync/microsoft-todo
 router.post('/sync/microsoft-todo', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: settingsRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = settingsRows[0];
 
     if (!settings?.microsoft_access_token) {
       return res.status(401).json({ error: 'Microsoft account not connected' });
@@ -219,13 +215,13 @@ router.post('/sync/microsoft-todo', async (req: Request, res: Response) => {
 
     const task = taskResponse.data;
 
-    const result = db.prepare(`
+    const { rows } = await pool.query(`
       INSERT INTO shopping_items (name, category, list_source, external_id)
-      VALUES (?, ?, 'microsoft_todo', ?)
-    `).run(name, category || 'General', task.id);
+      VALUES ($1, $2, 'microsoft_todo', $3)
+      RETURNING *
+    `, [name, category || 'General', task.id]);
 
-    const item = db.prepare('SELECT * FROM shopping_items WHERE id = ?').get(result.lastInsertRowid);
-    res.status(201).json(item);
+    res.status(201).json(rows[0]);
   } catch (err: any) {
     console.error('Microsoft To Do push error:', err?.response?.data || err.message);
     res.status(500).json({ error: 'Failed to push to Microsoft To Do' });
@@ -235,7 +231,6 @@ router.post('/sync/microsoft-todo', async (req: Request, res: Response) => {
 // GET /api/shopping/sync/google-keep
 router.get('/sync/google-keep', async (req: Request, res: Response) => {
   // Note: Google Keep has no official public API
-  // This is a placeholder that explains the limitation
   res.status(501).json({
     error: 'Google Keep does not have an official public API.',
     message: 'Google Keep integration is not available via official API. You can manually add items to your local list or use Microsoft To Do instead.',

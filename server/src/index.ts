@@ -14,16 +14,15 @@ import mealsRouter from './routes/meals';
 import calendarRouter from './routes/calendar';
 import authRouter from './routes/auth';
 import settingsRouter from './routes/settings';
-import { getDb } from './database';
+import { initDb } from './database';
 
 const app = express();
 const PORT = process.env.PORT || 3001;
 
-// Initialize DB on startup
-getDb();
+const clientUrl = process.env.CLIENT_URL || 'http://localhost:5173';
 
 app.use(cors({
-  origin: ['http://localhost:5173', 'http://127.0.0.1:5173'],
+  origin: [clientUrl, 'http://localhost:5173', 'http://127.0.0.1:5173'],
   credentials: true,
 }));
 
@@ -35,7 +34,7 @@ app.use(session({
   resave: false,
   saveUninitialized: false,
   cookie: {
-    secure: false,
+    secure: process.env.NODE_ENV === 'production',
     maxAge: 7 * 24 * 60 * 60 * 1000, // 7 days
   },
 }));
@@ -55,8 +54,22 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', timestamp: new Date().toISOString() });
 });
 
-app.listen(PORT, () => {
-  console.log(`🚀 Family Calendar Server running on http://localhost:${PORT}`);
-});
+// Serve static files in production
+if (process.env.NODE_ENV === 'production') {
+  const clientDistPath = path.join(__dirname, '../../client/dist');
+  app.use(express.static(clientDistPath));
+  app.get('*', (req, res) => {
+    res.sendFile(path.join(clientDistPath, 'index.html'));
+  });
+}
+
+async function start() {
+  await initDb();
+  app.listen(PORT, () => {
+    console.log(`Family Calendar Server running on port ${PORT}`);
+  });
+}
+
+start().catch(console.error);
 
 export default app;

@@ -1,17 +1,16 @@
 import { Router, Request, Response } from 'express';
-import { getDb } from '../database';
+import { pool } from '../database';
 
 const router = Router();
 
 // GET /api/settings
-router.get('/', (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
-    if (!settings) {
+    const { rows } = await pool.query('SELECT * FROM app_settings WHERE id = 1');
+    if (rows.length === 0) {
       return res.json({ id: 1, family_name: 'Our Family', timezone: 'America/New_York' });
     }
-    res.json(settings);
+    res.json(rows[0]);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to get settings' });
@@ -19,25 +18,28 @@ router.get('/', (req: Request, res: Response) => {
 });
 
 // PUT /api/settings
-router.put('/', (req: Request, res: Response) => {
+router.put('/', async (req: Request, res: Response) => {
   try {
     const { family_name, timezone } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM app_settings WHERE id = 1').get() as any;
+    const { rows: existingRows } = await pool.query('SELECT * FROM app_settings WHERE id = 1');
+    const existing = existingRows[0];
 
+    let result;
     if (existing) {
-      db.prepare(`
-        UPDATE app_settings SET family_name = ?, timezone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
-      `).run(family_name ?? existing.family_name, timezone ?? existing.timezone);
+      const { rows } = await pool.query(`
+        UPDATE app_settings SET family_name = $1, timezone = $2, updated_at = NOW() WHERE id = 1
+        RETURNING *
+      `, [family_name ?? existing.family_name, timezone ?? existing.timezone]);
+      result = rows[0];
     } else {
-      db.prepare('INSERT INTO app_settings (family_name, timezone) VALUES (?, ?)').run(
-        family_name || 'Our Family',
-        timezone || 'America/New_York'
+      const { rows } = await pool.query(
+        'INSERT INTO app_settings (family_name, timezone) VALUES ($1, $2) RETURNING *',
+        [family_name || 'Our Family', timezone || 'America/New_York']
       );
+      result = rows[0];
     }
 
-    const updated = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
-    res.json(updated);
+    res.json(result);
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Failed to update settings' });
@@ -45,24 +47,27 @@ router.put('/', (req: Request, res: Response) => {
 });
 
 // POST /api/settings (alias for initial create)
-router.post('/', (req: Request, res: Response) => {
+router.post('/', async (req: Request, res: Response) => {
   try {
     const { family_name, timezone } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM app_settings WHERE id = 1').get() as any;
+    const { rows: existingRows } = await pool.query('SELECT * FROM app_settings WHERE id = 1');
+    const existing = existingRows[0];
 
+    let result;
     if (existing) {
-      db.prepare(`
-        UPDATE app_settings SET family_name = ?, timezone = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1
-      `).run(family_name ?? existing.family_name, timezone ?? existing.timezone);
+      const { rows } = await pool.query(`
+        UPDATE app_settings SET family_name = $1, timezone = $2, updated_at = NOW() WHERE id = 1
+        RETURNING *
+      `, [family_name ?? existing.family_name, timezone ?? existing.timezone]);
+      result = rows[0];
     } else {
-      db.prepare('INSERT INTO app_settings (family_name, timezone) VALUES (?, ?)').run(
-        family_name || 'Our Family',
-        timezone || 'America/New_York'
+      const { rows } = await pool.query(
+        'INSERT INTO app_settings (family_name, timezone) VALUES ($1, $2) RETURNING *',
+        [family_name || 'Our Family', timezone || 'America/New_York']
       );
+      result = rows[0];
     }
 
-    const result = db.prepare('SELECT * FROM app_settings WHERE id = 1').get();
     res.json(result);
   } catch (err) {
     console.error(err);

@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { google } from 'googleapis';
 import { OAuth2Client } from 'google-auth-library';
-import { getDb } from '../database';
+import { pool } from '../database';
 
 const router = Router();
 
@@ -16,8 +16,8 @@ function getGoogleClient(): OAuth2Client {
 // GET /api/calendar/events
 router.get('/events', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: settingsRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = settingsRows[0];
 
     if (!settings?.google_access_token) {
       // Return sample events if not connected
@@ -38,7 +38,7 @@ router.get('/events', async (req: Request, res: Response) => {
           start: { dateTime: new Date(new Date().setHours(15, 0)).toISOString() },
           end: { dateTime: new Date(new Date().setHours(16, 30)).toISOString() },
           colorId: '2',
-          description: 'Jake\'s soccer practice',
+          description: "Jake's soccer practice",
           isSample: true,
         },
         {
@@ -47,7 +47,7 @@ router.get('/events', async (req: Request, res: Response) => {
           start: { dateTime: new Date(new Date(Date.now() + 86400000).setHours(16, 0)).toISOString() },
           end: { dateTime: new Date(new Date(Date.now() + 86400000).setHours(17, 0)).toISOString() },
           colorId: '6',
-          description: 'Emma\'s piano lesson',
+          description: "Emma's piano lesson",
           isSample: true,
         },
         {
@@ -79,10 +79,9 @@ router.get('/events', async (req: Request, res: Response) => {
     });
 
     // Auto-refresh token if expired
-    auth.on('tokens', (tokens) => {
+    auth.on('tokens', async (tokens) => {
       if (tokens.access_token) {
-        db.prepare('UPDATE calendar_settings SET google_access_token = ? WHERE id = 1')
-          .run(tokens.access_token);
+        await pool.query('UPDATE calendar_settings SET google_access_token = $1 WHERE id = 1', [tokens.access_token]);
       }
     });
 
@@ -115,8 +114,8 @@ router.get('/events', async (req: Request, res: Response) => {
 // GET /api/calendar/calendars - list available calendars
 router.get('/calendars', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: settingsRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = settingsRows[0];
 
     if (!settings?.google_access_token) {
       return res.status(401).json({ error: 'Google Calendar not connected' });
@@ -139,17 +138,22 @@ router.get('/calendars', async (req: Request, res: Response) => {
 });
 
 // POST /api/calendar/settings
-router.post('/settings', (req: Request, res: Response) => {
+router.post('/settings', async (req: Request, res: Response) => {
   try {
     const { google_calendar_id } = req.body;
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get();
+    const { rows: existingRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const existing = existingRows[0];
 
     if (existing) {
-      db.prepare('UPDATE calendar_settings SET google_calendar_id = ?, updated_at = CURRENT_TIMESTAMP WHERE id = 1')
-        .run(google_calendar_id);
+      await pool.query(
+        'UPDATE calendar_settings SET google_calendar_id = $1, updated_at = NOW() WHERE id = 1',
+        [google_calendar_id]
+      );
     } else {
-      db.prepare('INSERT INTO calendar_settings (google_calendar_id) VALUES (?)').run(google_calendar_id);
+      await pool.query(
+        'INSERT INTO calendar_settings (google_calendar_id) VALUES ($1)',
+        [google_calendar_id]
+      );
     }
 
     res.json({ success: true });
@@ -162,8 +166,8 @@ router.post('/settings', (req: Request, res: Response) => {
 // POST /api/calendar/events - Create new event
 router.post('/events', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: settingsRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = settingsRows[0];
 
     if (!settings?.google_access_token) {
       return res.status(401).json({ error: 'Google Calendar not connected' });

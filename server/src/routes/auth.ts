@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { OAuth2Client } from 'google-auth-library';
-import { getDb } from '../database';
+import { pool } from '../database';
 import axios from 'axios';
 
 const router = Router();
@@ -37,22 +37,22 @@ router.get('/google/callback', async (req: Request, res: Response) => {
     const { tokens } = await googleClient.getToken(code as string);
     googleClient.setCredentials(tokens);
 
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: existingRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const existing = existingRows[0];
 
     if (existing) {
-      db.prepare(`
+      await pool.query(`
         UPDATE calendar_settings SET
-          google_access_token = ?,
-          google_refresh_token = ?,
-          updated_at = CURRENT_TIMESTAMP
+          google_access_token = $1,
+          google_refresh_token = $2,
+          updated_at = NOW()
         WHERE id = 1
-      `).run(tokens.access_token, tokens.refresh_token || existing.google_refresh_token);
+      `, [tokens.access_token, tokens.refresh_token || existing.google_refresh_token]);
     } else {
-      db.prepare(`
+      await pool.query(`
         INSERT INTO calendar_settings (google_access_token, google_refresh_token)
-        VALUES (?, ?)
-      `).run(tokens.access_token, tokens.refresh_token);
+        VALUES ($1, $2)
+      `, [tokens.access_token, tokens.refresh_token]);
     }
 
     (req.session as any).googleTokens = tokens;
@@ -104,22 +104,22 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
 
     const { access_token, refresh_token } = tokenResponse.data;
 
-    const db = getDb();
-    const existing = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows: existingRows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const existing = existingRows[0];
 
     if (existing) {
-      db.prepare(`
+      await pool.query(`
         UPDATE calendar_settings SET
-          microsoft_access_token = ?,
-          microsoft_refresh_token = ?,
-          updated_at = CURRENT_TIMESTAMP
+          microsoft_access_token = $1,
+          microsoft_refresh_token = $2,
+          updated_at = NOW()
         WHERE id = 1
-      `).run(access_token, refresh_token || existing.microsoft_refresh_token);
+      `, [access_token, refresh_token || existing.microsoft_refresh_token]);
     } else {
-      db.prepare(`
+      await pool.query(`
         INSERT INTO calendar_settings (microsoft_access_token, microsoft_refresh_token)
-        VALUES (?, ?)
-      `).run(access_token, refresh_token);
+        VALUES ($1, $2)
+      `, [access_token, refresh_token]);
     }
 
     (req.session as any).microsoftTokens = { access_token, refresh_token };
@@ -131,10 +131,10 @@ router.get('/microsoft/callback', async (req: Request, res: Response) => {
 });
 
 // GET /api/auth/status - Check connection status
-router.get('/status', (req: Request, res: Response) => {
+router.get('/status', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    const settings = db.prepare('SELECT * FROM calendar_settings WHERE id = 1').get() as any;
+    const { rows } = await pool.query('SELECT * FROM calendar_settings WHERE id = 1');
+    const settings = rows[0];
 
     res.json({
       google: {
@@ -151,17 +151,16 @@ router.get('/status', (req: Request, res: Response) => {
 });
 
 // POST /api/auth/disconnect/google
-router.post('/disconnect/google', (req: Request, res: Response) => {
+router.post('/disconnect/google', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    db.prepare(`
+    await pool.query(`
       UPDATE calendar_settings SET
         google_access_token = NULL,
         google_refresh_token = NULL,
         google_calendar_id = NULL,
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = NOW()
       WHERE id = 1
-    `).run();
+    `);
     res.json({ success: true });
   } catch (err) {
     console.error(err);
@@ -170,16 +169,15 @@ router.post('/disconnect/google', (req: Request, res: Response) => {
 });
 
 // POST /api/auth/disconnect/microsoft
-router.post('/disconnect/microsoft', (req: Request, res: Response) => {
+router.post('/disconnect/microsoft', async (req: Request, res: Response) => {
   try {
-    const db = getDb();
-    db.prepare(`
+    await pool.query(`
       UPDATE calendar_settings SET
         microsoft_access_token = NULL,
         microsoft_refresh_token = NULL,
-        updated_at = CURRENT_TIMESTAMP
+        updated_at = NOW()
       WHERE id = 1
-    `).run();
+    `);
     res.json({ success: true });
   } catch (err) {
     console.error(err);
